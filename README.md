@@ -63,10 +63,11 @@ PDF 下載功能會用 Chromium 將 SEC HTML print-to-PDF。`packages.txt` 已�
 2. 手動輸入 ticker、form type、年度區間，或上傳 `templates/sec_download_template.xlsx`。
 3. 點選 `Query SEC metadata and build filing preview`。
 4. 在 preview table 勾選要下載的 filing。
-5. 點選 `Download selected filings`。
-6. 在結果區檢視 HTML、PDF、clean text 路徑與 clean text preview。
-7. 點選 `Fetch SEC Company Facts` 顯示季度財務表與趨勢圖。
-8. 使用下載按鈕匯出 manifest 與 financials CSV。
+5. 選擇是否 `Include clean text`。
+6. 點選 `Prepare ZIP package`。
+7. 套件完成後點選 `Download ZIP to computer`，即可下載到本機。
+8. 點選 `Fetch SEC Company Facts` 顯示季度財務表與趨勢圖。
+9. 使用下載按鈕匯出 manifest 與 financials CSV。
 
 ## 專案結構
 

@@ -145,9 +145,8 @@ def show_download_results(results: pd.DataFrame) -> None:
         file_name=f"download_manifest_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
         mime="text/csv",
     )
-    success = results.loc[results["status"] == "success"]
+    success = results.loc[results["status"].isin(["success", "success_with_warnings"])]
     if not success.empty:
-        add_result_zip_buttons(success)
         labels = success.apply(lambda r: f"{r['ticker']} {r['form']} {r['filing_date']} {r['accession_number']}", axis=1)
         selected_label = st.selectbox("Preview clean text", labels.tolist())
         selected_row = success.iloc[labels.tolist().index(selected_label)]
@@ -155,14 +154,6 @@ def show_download_results(results: pd.DataFrame) -> None:
         if text_path.exists():
             text = text_path.read_text(encoding="utf-8", errors="ignore")
             st.text_area("Clean text preview", text[:12000], height=360)
-        pdf_path = Path(str(selected_row.get("pdf_path", "")))
-        if pdf_path.exists():
-            st.download_button(
-                "Download selected PDF",
-                data=pdf_path.read_bytes(),
-                file_name=pdf_path.name,
-                mime="application/pdf",
-            )
 
 
 def _files_for_zip(results: pd.DataFrame, columns: list[str], folder: str) -> list[tuple[Path, str]]:
@@ -183,48 +174,44 @@ def _files_for_zip(results: pd.DataFrame, columns: list[str], folder: str) -> li
     return files
 
 
-def add_result_zip_buttons(success: pd.DataFrame) -> None:
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+def build_result_zip(success: pd.DataFrame, include_clean_text: bool) -> tuple[bytes, dict[str, int]]:
     manifest_csv = success.to_csv(index=False).encode("utf-8-sig")
     html_files = _files_for_zip(success, ["html_path"], "html")
-    text_files = _files_for_zip(success, ["clean_text_path"], "clean_text")
+    text_files = _files_for_zip(success, ["clean_text_path"], "clean_text") if include_clean_text else []
     pdf_files = _files_for_zip(success, ["pdf_path"], "pdf")
     all_files = html_files + text_files + pdf_files
+    summary = {
+        "processed_filings": int(len(success)),
+        "html_files": len(html_files),
+        "pdf_files": len(pdf_files),
+        "clean_text_files": len(text_files),
+        "total_files": len(all_files),
+    }
+    return build_zip_bytes(all_files, manifest_csv=manifest_csv), summary
 
-    st.caption("On Streamlit Cloud, use these ZIP buttons to download generated files to your computer.")
+
+def show_zip_package_download() -> None:
+    package = st.session_state.get("zip_package")
+    if not package:
+        return
+    summary = package["summary"]
+    st.subheader("ZIP Package Ready")
     col1, col2, col3, col4 = st.columns(4)
-    with col1:
-        st.download_button(
-            "Download all files ZIP",
-            data=build_zip_bytes(all_files, manifest_csv=manifest_csv),
-            file_name=f"sec_download_all_{timestamp}.zip",
-            mime="application/zip",
-            disabled=not all_files,
-        )
-    with col2:
-        st.download_button(
-            "Download HTML ZIP",
-            data=build_zip_bytes(html_files, manifest_csv=manifest_csv),
-            file_name=f"sec_html_{timestamp}.zip",
-            mime="application/zip",
-            disabled=not html_files,
-        )
-    with col3:
-        st.download_button(
-            "Download clean text ZIP",
-            data=build_zip_bytes(text_files, manifest_csv=manifest_csv),
-            file_name=f"sec_clean_text_{timestamp}.zip",
-            mime="application/zip",
-            disabled=not text_files,
-        )
-    with col4:
-        st.download_button(
-            "Download PDF ZIP",
-            data=build_zip_bytes(pdf_files, manifest_csv=manifest_csv),
-            file_name=f"sec_pdf_{timestamp}.zip",
-            mime="application/zip",
-            disabled=not pdf_files,
-        )
+    col1.metric("Processed filings", summary["processed_filings"])
+    col2.metric("HTML files", summary["html_files"])
+    col3.metric("PDF files", summary["pdf_files"])
+    col4.metric("Clean text files", summary["clean_text_files"])
+    st.download_button(
+        "Download ZIP to computer",
+        data=package["data"],
+        file_name=package["file_name"],
+        mime="application/zip",
+        type="primary",
+        use_container_width=True,
+    )
+    if package.get("warnings"):
+        for warning in package["warnings"]:
+            st.warning(warning)
 
 
 def show_financial_dashboard(manifest_or_tasks: pd.DataFrame) -> None:
@@ -299,7 +286,7 @@ def main() -> None:
                 value="AAPL",
                 help="You can enter one ticker or multiple tickers separated by commas, for example: AAPL, MSFT, NVDA.",
             ).strip().upper()
-            st.caption("多檔股票請用逗號分隔，例如：AAPL, MSFT, NVDA。系統會為每個 ticker 建立一筆下載任務。")
+            st.caption("For multiple tickers, separate them with commas. Example: AAPL, MSFT, NVDA.")
         with col2:
             form_type = st.selectbox("Form type", SUPPORTED_FORMS)
         with col3:
@@ -310,7 +297,7 @@ def main() -> None:
             download_type = st.selectbox(
                 "Download type",
                 SUPPORTED_DOWNLOAD_TYPES,
-                help="html 會儲存 SEC 原始 HTML 並產生 clean text；pdf 會先下載 HTML，再用瀏覽器列印方式轉成 PDF。",
+                help="html packages the SEC source HTML. pdf packages the SEC source HTML and browser-rendered PDF.",
             )
         raw_tasks = build_manual_task(ticker, form_type, int(start_year), int(end_year), download_type)
     else:
@@ -356,7 +343,14 @@ def main() -> None:
             file_name=f"filing_preview_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
             mime="text/csv",
         )
-        if st.button("Download selected filings", disabled=selected.empty):
+        st.divider()
+        package_col, option_col = st.columns([2, 1])
+        with package_col:
+            st.markdown("**Prepare selected filings as a ZIP package**")
+            st.caption("The app will fetch the selected SEC filings, build the package on the server, then show one ZIP download button for your computer.")
+        with option_col:
+            include_clean_text = st.checkbox("Include clean text", value=True)
+        if st.button("Prepare ZIP package", type="primary", disabled=selected.empty, use_container_width=True):
             progress = st.progress(0)
             latest = st.empty()
 
@@ -364,10 +358,32 @@ def main() -> None:
                 progress.progress(done / total)
                 latest.write(f"{done}/{total}: {result['ticker']} {result['form']} {result['filing_date']} - {result['status']}")
 
-            st.session_state["download_results"] = download_selected_filings(get_client(), selected, update_progress)
+            results = download_selected_filings(get_client(), selected, update_progress)
+            st.session_state["download_results"] = results
+            success = results.loc[results["status"].isin(["success", "success_with_warnings"])]
+            if not success.empty:
+                zip_data, summary = build_result_zip(success, include_clean_text=include_clean_text)
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                st.session_state["zip_package"] = {
+                    "data": zip_data,
+                    "file_name": f"sec_filings_{timestamp}.zip",
+                    "summary": summary,
+                    "warnings": [],
+                }
+                failed = int((results["status"] == "failed").sum())
+                if failed:
+                    st.session_state["zip_package"]["warnings"].append(f"{failed} filing(s) failed. See the results table for details.")
+                warnings = int((results["status"] == "success_with_warnings").sum())
+                if warnings:
+                    st.session_state["zip_package"]["warnings"].append(
+                        f"{warnings} filing(s) were packaged with warnings, usually because PDF conversion failed on Streamlit Cloud."
+                    )
+            else:
+                st.session_state["zip_package"] = None
             progress.progress(1.0)
-            st.success("Download step finished.")
+            st.success("ZIP package is ready.")
 
+    show_zip_package_download()
     show_download_results(st.session_state.get("download_results", pd.DataFrame()))
     show_financial_dashboard(manifest)
 
