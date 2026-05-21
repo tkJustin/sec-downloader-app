@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
@@ -15,6 +16,7 @@ ALPHA_VANTAGE_FUNCTIONS = {
     "Weekly": ("TIME_SERIES_WEEKLY_ADJUSTED", "Weekly Adjusted Time Series"),
     "Monthly": ("TIME_SERIES_MONTHLY_ADJUSTED", "Monthly Adjusted Time Series"),
 }
+ALPHA_VANTAGE_DAILY_FALLBACK = ("TIME_SERIES_DAILY", "Time Series (Daily)")
 YFINANCE_INTERVALS = {"Daily": "1d", "Weekly": "1wk", "Monthly": "1mo"}
 PRICE_COLUMNS = [
     "Date",
@@ -86,6 +88,7 @@ def fetch_stock_prices(
         try:
             if provider == "Alpha Vantage":
                 frame = fetch_alpha_vantage_prices(ticker, start_date, end_date, frequency, alpha_vantage_api_key or "")
+                time.sleep(1.1)
             elif provider == "yfinance backup":
                 frame = fetch_yfinance_prices(ticker, start_date, end_date, frequency)
             else:
@@ -120,19 +123,17 @@ def fetch_alpha_vantage_prices(
     api_key: str,
 ) -> pd.DataFrame:
     function, series_key = ALPHA_VANTAGE_FUNCTIONS[frequency]
-    params = {"function": function, "symbol": ticker, "apikey": api_key, "outputsize": "full"}
+    adjusted = True
     try:
-        response = requests.get(ALPHA_VANTAGE_URL, params=params, timeout=30)
-        response.raise_for_status()
-        payload = response.json()
-    except requests.RequestException as exc:
-        raise StockPriceError(f"Alpha Vantage request failed: {exc}") from exc
-    except ValueError as exc:
-        raise StockPriceError("Alpha Vantage returned an invalid JSON response.") from exc
+        payload = _request_alpha_vantage(function, ticker, api_key)
+    except StockPriceError as exc:
+        if frequency == "Daily" and "premium endpoint" in str(exc).lower():
+            function, series_key = ALPHA_VANTAGE_DAILY_FALLBACK
+            adjusted = False
+            payload = _request_alpha_vantage(function, ticker, api_key)
+        else:
+            raise
 
-    for key in ["Error Message", "Note", "Information"]:
-        if key in payload:
-            raise StockPriceError(str(payload[key]))
     if series_key not in payload or not isinstance(payload[series_key], dict):
         raise StockPriceError("Unexpected Alpha Vantage response format or empty time series.")
 
@@ -149,13 +150,31 @@ def fetch_alpha_vantage_prices(
                 "High": values.get("2. high"),
                 "Low": values.get("3. low"),
                 "Close": values.get("4. close"),
-                "Adjusted Close": values.get("5. adjusted close"),
-                "Volume": values.get("6. volume"),
+                "Adjusted Close": values.get("5. adjusted close") if adjusted else pd.NA,
+                "Volume": values.get("6. volume") if adjusted else values.get("5. volume"),
                 "Data Frequency": frequency,
                 "Data Provider": "Alpha Vantage",
             }
         )
     return pd.DataFrame(rows, columns=PRICE_COLUMNS)
+
+
+def _request_alpha_vantage(function: str, ticker: str, api_key: str) -> dict[str, Any]:
+    time.sleep(1.1)
+    params = {"function": function, "symbol": ticker, "apikey": api_key, "outputsize": "full"}
+    try:
+        response = requests.get(ALPHA_VANTAGE_URL, params=params, timeout=30)
+        response.raise_for_status()
+        payload = response.json()
+    except requests.RequestException as exc:
+        raise StockPriceError(f"Alpha Vantage request failed: {exc}") from exc
+    except ValueError as exc:
+        raise StockPriceError("Alpha Vantage returned an invalid JSON response.") from exc
+
+    for key in ["Error Message", "Note", "Information"]:
+        if key in payload:
+            raise StockPriceError(str(payload[key]))
+    return payload
 
 
 def fetch_yfinance_prices(ticker: str, start_date: date, end_date: date, frequency: str) -> pd.DataFrame:
