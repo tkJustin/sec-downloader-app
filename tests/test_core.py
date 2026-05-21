@@ -1,10 +1,12 @@
 import pandas as pd
 import pytest
+from zipfile import ZipFile
 
 from app import submissions_to_filings
 from modules.html_parser import html_to_clean_text
 from modules.financial_facts import _build_quarterly_values, _prepare_rows
 from modules.sec_client import SecClientError
+from modules.storage import build_zip_bytes
 from modules.task_builder import build_manual_task, normalize_tasks, parse_ticker_input
 
 
@@ -65,6 +67,17 @@ def test_submissions_to_filings_filters_form_and_year():
 def test_invalid_ticker_error_message_shape():
     with pytest.raises(SecClientError, match="Ticker not found"):
         raise SecClientError("Ticker not found in SEC company_tickers.json: INVALIDTICKER123")
+
+
+def test_build_zip_bytes_includes_manifest_and_files(tmp_path):
+    html = tmp_path / "filing.html"
+    html.write_text("<html>ok</html>", encoding="utf-8")
+    payload = build_zip_bytes([(html, "html/filing.html")], manifest_csv=b"ticker\nAAPL\n")
+    zip_path = tmp_path / "out.zip"
+    zip_path.write_bytes(payload)
+    with ZipFile(zip_path) as archive:
+        assert sorted(archive.namelist()) == ["html/filing.html", "manifest.csv"]
+        assert archive.read("manifest.csv") == b"ticker\nAAPL\n"
 
 
 def test_flow_q4_is_derived_from_fy_less_first_three_quarters():

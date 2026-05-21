@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 from datetime import datetime
+from io import BytesIO
 from pathlib import Path
 from typing import Any
+from zipfile import ZIP_DEFLATED, ZipFile
 
 import pandas as pd
 
@@ -35,3 +37,26 @@ def export_dataframe(df: pd.DataFrame, stem: str) -> Path:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     path = EXPORTS_DIR / f"{safe_filename(stem)}_{timestamp}.csv"
     return write_csv(df, path)
+
+
+def build_zip_bytes(files: list[tuple[Path, str]], manifest_csv: bytes | None = None) -> bytes:
+    buffer = BytesIO()
+    seen: set[str] = set()
+    with ZipFile(buffer, "w", compression=ZIP_DEFLATED) as archive:
+        if manifest_csv is not None:
+            archive.writestr("manifest.csv", manifest_csv)
+        for path, archive_name in files:
+            if not path.exists() or not path.is_file():
+                continue
+            name = archive_name.replace("\\", "/")
+            if name in seen:
+                stem = Path(name).stem
+                suffix = Path(name).suffix
+                parent = Path(name).parent
+                counter = 2
+                while name in seen:
+                    name = str(parent / f"{stem}_{counter}{suffix}").replace("\\", "/")
+                    counter += 1
+            archive.write(path, arcname=name)
+            seen.add(name)
+    return buffer.getvalue()

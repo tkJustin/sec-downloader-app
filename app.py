@@ -22,7 +22,7 @@ from modules.analysis import build_trend_chart
 from modules.downloader import download_selected_filings
 from modules.financial_facts import facts_to_quarterly_dataframe
 from modules.sec_client import SecClient, SecClientError
-from modules.storage import append_download_log, write_csv
+from modules.storage import append_download_log, build_zip_bytes, safe_filename, write_csv
 from modules.task_builder import build_manual_task, normalize_tasks
 
 
@@ -147,6 +147,7 @@ def show_download_results(results: pd.DataFrame) -> None:
     )
     success = results.loc[results["status"] == "success"]
     if not success.empty:
+        add_result_zip_buttons(success)
         labels = success.apply(lambda r: f"{r['ticker']} {r['form']} {r['filing_date']} {r['accession_number']}", axis=1)
         selected_label = st.selectbox("Preview clean text", labels.tolist())
         selected_row = success.iloc[labels.tolist().index(selected_label)]
@@ -162,6 +163,68 @@ def show_download_results(results: pd.DataFrame) -> None:
                 file_name=pdf_path.name,
                 mime="application/pdf",
             )
+
+
+def _files_for_zip(results: pd.DataFrame, columns: list[str], folder: str) -> list[tuple[Path, str]]:
+    files: list[tuple[Path, str]] = []
+    for _, row in results.iterrows():
+        ticker = safe_filename(str(row.get("ticker", "UNKNOWN")))
+        filing_date = safe_filename(str(row.get("filing_date", "")))
+        form = safe_filename(str(row.get("form", "")))
+        accession = safe_filename(str(row.get("accession_number", "")))
+        prefix = f"{ticker}_{filing_date}_{form}_{accession}"
+        for column in columns:
+            value = str(row.get(column, "") or "")
+            if not value:
+                continue
+            path = Path(value)
+            if path.exists():
+                files.append((path, f"{folder}/{prefix}{path.suffix}"))
+    return files
+
+
+def add_result_zip_buttons(success: pd.DataFrame) -> None:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    manifest_csv = success.to_csv(index=False).encode("utf-8-sig")
+    html_files = _files_for_zip(success, ["html_path"], "html")
+    text_files = _files_for_zip(success, ["clean_text_path"], "clean_text")
+    pdf_files = _files_for_zip(success, ["pdf_path"], "pdf")
+    all_files = html_files + text_files + pdf_files
+
+    st.caption("On Streamlit Cloud, use these ZIP buttons to download generated files to your computer.")
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.download_button(
+            "Download all files ZIP",
+            data=build_zip_bytes(all_files, manifest_csv=manifest_csv),
+            file_name=f"sec_download_all_{timestamp}.zip",
+            mime="application/zip",
+            disabled=not all_files,
+        )
+    with col2:
+        st.download_button(
+            "Download HTML ZIP",
+            data=build_zip_bytes(html_files, manifest_csv=manifest_csv),
+            file_name=f"sec_html_{timestamp}.zip",
+            mime="application/zip",
+            disabled=not html_files,
+        )
+    with col3:
+        st.download_button(
+            "Download clean text ZIP",
+            data=build_zip_bytes(text_files, manifest_csv=manifest_csv),
+            file_name=f"sec_clean_text_{timestamp}.zip",
+            mime="application/zip",
+            disabled=not text_files,
+        )
+    with col4:
+        st.download_button(
+            "Download PDF ZIP",
+            data=build_zip_bytes(pdf_files, manifest_csv=manifest_csv),
+            file_name=f"sec_pdf_{timestamp}.zip",
+            mime="application/zip",
+            disabled=not pdf_files,
+        )
 
 
 def show_financial_dashboard(manifest_or_tasks: pd.DataFrame) -> None:
