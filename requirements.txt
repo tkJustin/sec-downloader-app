@@ -1,0 +1,11 @@
+streamlit>=1.36
+pandas>=2.2
+requests>=2.32
+beautifulsoup4>=4.12
+lxml>=5.2
+openpyxl>=3.1
+plotly>=5.22
+pytest>=8.2
+pygments>=2.18
+pypdf>=5.0
+playwright>=1.48
