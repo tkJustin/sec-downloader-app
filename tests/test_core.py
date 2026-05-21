@@ -8,6 +8,12 @@ from modules.financial_facts import _build_quarterly_values, _prepare_rows
 from modules.sec_client import SecClientError
 from modules.storage import build_zip_bytes
 from modules.task_builder import build_manual_task, normalize_tasks, parse_ticker_input
+from utils.stock_price import (
+    parse_tickers,
+    standardize_stock_price_data,
+    validate_stock_price_inputs,
+)
+from datetime import date
 
 
 def test_normalize_tasks_accepts_template_shape():
@@ -78,6 +84,34 @@ def test_build_zip_bytes_includes_manifest_and_files(tmp_path):
     with ZipFile(zip_path) as archive:
         assert sorted(archive.namelist()) == ["html/filing.html", "manifest.csv"]
         assert archive.read("manifest.csv") == b"ticker\nAAPL\n"
+
+
+def test_stock_parse_tickers_accepts_comma_separated_symbols():
+    assert parse_tickers("aapl, MSFT, nvda") == ["AAPL", "MSFT", "NVDA"]
+
+
+def test_stock_validation_catches_reversed_dates():
+    errors = validate_stock_price_inputs("AAPL", date(2024, 12, 31), date(2024, 1, 1), "yfinance backup")
+    assert any("Start date" in error for error in errors)
+
+
+def test_stock_validation_requires_alpha_vantage_key():
+    errors = validate_stock_price_inputs("AAPL", date(2024, 1, 1), date(2024, 12, 31), "Alpha Vantage", "")
+    assert any("API key is missing" in error for error in errors)
+
+
+def test_standardize_stock_price_data_sorts_and_deduplicates():
+    raw = pd.DataFrame(
+        [
+            {"Date": "2024-01-02", "Ticker": "AAPL", "Open": "1", "High": "2", "Low": "1", "Close": "2", "Adjusted Close": "2", "Volume": "100", "Data Frequency": "Daily", "Data Provider": "test"},
+            {"Date": "2024-01-02", "Ticker": "AAPL", "Open": "1", "High": "2", "Low": "1", "Close": "2", "Adjusted Close": "2", "Volume": "100", "Data Frequency": "Daily", "Data Provider": "test"},
+        ]
+    )
+    clean, warnings = standardize_stock_price_data(raw)
+    assert len(clean) == 1
+    assert clean.iloc[0]["Date"] == "2024-01-02"
+    assert clean.iloc[0]["Close"] == 2
+    assert warnings
 
 
 def test_flow_q4_is_derived_from_fy_less_first_three_quarters():

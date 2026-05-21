@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from datetime import datetime
+from datetime import date
 from pathlib import Path
 
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 
 from config import (
@@ -24,6 +26,11 @@ from modules.financial_facts import facts_to_quarterly_dataframe
 from modules.sec_client import SecClient, SecClientError
 from modules.storage import append_download_log, build_zip_bytes, safe_filename, write_csv
 from modules.task_builder import build_manual_task, normalize_tasks
+from utils.stock_price import (
+    fetch_stock_prices,
+    parse_tickers,
+    validate_stock_price_inputs,
+)
 
 
 st.set_page_config(page_title=APP_NAME, layout="wide")
@@ -33,6 +40,16 @@ ensure_directories()
 @st.cache_resource(show_spinner=False)
 def get_client() -> SecClient:
     return SecClient()
+
+
+def get_alpha_vantage_api_key() -> str:
+    try:
+        secret_value = st.secrets.get("ALPHA_VANTAGE_API_KEY", "")
+        if secret_value:
+            return str(secret_value)
+    except Exception:
+        pass
+    return ""
 
 
 def submissions_to_filings(ticker: str, cik: int, submissions: dict, form_type: str, start_year: int, end_year: int) -> pd.DataFrame:
@@ -263,20 +280,19 @@ def show_financial_dashboard(manifest_or_tasks: pd.DataFrame) -> None:
         st.plotly_chart(fig, use_container_width=True)
 
 
-def main() -> None:
+def render_sec_downloader() -> None:
     st.title(APP_NAME)
     st.caption("Local SEC EDGAR filing HTML downloader, clean text converter, and Company Facts dashboard.")
 
-    with st.sidebar:
-        st.header("Input")
-        input_mode = st.radio("Task source", ["Manual input", "Excel/CSV upload"], horizontal=False)
-        if TEMPLATE_PATH.exists():
-            st.download_button(
-                "Download Excel template",
-                data=TEMPLATE_PATH.read_bytes(),
-                file_name=TEMPLATE_PATH.name,
-                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            )
+    st.sidebar.header("SEC Inputs")
+    input_mode = st.sidebar.radio("Task source", ["Manual input", "Excel/CSV upload"], horizontal=False)
+    if TEMPLATE_PATH.exists():
+        st.sidebar.download_button(
+            "Download Excel template",
+            data=TEMPLATE_PATH.read_bytes(),
+            file_name=TEMPLATE_PATH.name,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
 
     if input_mode == "Manual input":
         col1, col2, col3, col4, col5 = st.columns([1.3, 1, 1, 1, 1])
@@ -394,6 +410,112 @@ def main() -> None:
         st.write(f"Clean text: `{CLEAN_TEXT_DIR}`")
         st.write(f"Exports: `{EXPORTS_DIR}`")
         st.write(f"Download log: `{DOWNLOAD_LOG_PATH}`")
+
+
+def render_stock_price_downloader() -> None:
+    st.title("Stock Price Data Downloader")
+    st.write(
+        "This page allows users to download historical stock price data by ticker symbol, "
+        "date range, and data frequency."
+    )
+    st.info(
+        "Data source notice: The default stock price data provider is Alpha Vantage. yfinance is available only "
+        "as a backup option for research and educational use. Users should verify data accuracy and data usage "
+        "rights before using the output for investment, trading, regulatory, or commercial purposes."
+    )
+
+    default_api_key = get_alpha_vantage_api_key()
+    with st.container():
+        col1, col2 = st.columns([2, 1])
+        with col1:
+            ticker_input = st.text_input("Ticker symbols", value="AAPL, MSFT", help="Separate multiple tickers with commas.")
+        with col2:
+            provider = st.selectbox("Data provider", ["Alpha Vantage", "yfinance backup"])
+
+        col3, col4, col5 = st.columns(3)
+        with col3:
+            start_date = st.date_input("Start date", value=date(2024, 1, 1))
+        with col4:
+            end_date = st.date_input("End date", value=min(date.today(), date(2024, 12, 31)))
+        with col5:
+            frequency = st.selectbox("Data frequency", ["Daily", "Weekly", "Monthly"])
+
+    manual_api_key = ""
+    if provider == "Alpha Vantage":
+        if default_api_key:
+            st.success("Alpha Vantage API key loaded from Streamlit secrets.")
+        else:
+            manual_api_key = st.text_input(
+                "Alpha Vantage API key",
+                type="password",
+                help="Enter an Alpha Vantage API key for this session. The key is not stored by the app.",
+            )
+
+    api_key = default_api_key or manual_api_key.strip()
+    if st.button("Fetch stock price data", type="primary"):
+        errors = validate_stock_price_inputs(ticker_input, start_date, end_date, provider, api_key)
+        if errors:
+            for error in errors:
+                st.error(error)
+            return
+
+        with st.status("Fetching stock price data...", expanded=True) as status:
+            tickers = parse_tickers(ticker_input)
+            st.write(f"Provider: {provider}")
+            st.write(f"Tickers: {', '.join(tickers)}")
+            result = fetch_stock_prices(tickers, start_date, end_date, frequency, provider, api_key)
+            status.update(label="Stock price fetch complete", state="complete")
+        st.session_state["stock_price_result"] = result
+
+    result = st.session_state.get("stock_price_result")
+    if not result:
+        return
+
+    for warning in result.warnings:
+        st.warning(warning)
+    if result.data.empty:
+        st.error("No stock price data available for the selected inputs.")
+        if result.failed_tickers:
+            st.write(result.failed_tickers)
+        return
+
+    data = result.data
+    st.subheader("Results")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Rows", f"{len(data):,}")
+    c2.metric("Unique tickers", data["Ticker"].nunique())
+    c3.metric("Earliest date", data["Date"].min())
+    c4.metric("Latest date", data["Date"].max())
+    st.caption(f"Data provider used: {result.provider_used}")
+
+    st.dataframe(data, use_container_width=True, hide_index=True)
+    with st.expander("Data quality checks"):
+        missing = data.isna().sum().rename("Missing values").reset_index().rename(columns={"index": "Column"})
+        duplicated = int(data.duplicated(subset=["Date", "Ticker"]).sum())
+        st.write(f"Duplicated Date-Ticker rows after cleaning: {duplicated}")
+        st.dataframe(missing, use_container_width=True, hide_index=True)
+
+    fig = px.line(data, x="Date", y="Close", color="Ticker", title="Close Price Over Time")
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.download_button(
+        "Download stock price CSV",
+        data=data.to_csv(index=False).encode("utf-8-sig"),
+        file_name=f"stock_price_data_{datetime.now().strftime('%Y%m%d')}.csv",
+        mime="text/csv",
+        type="primary",
+    )
+
+
+def main() -> None:
+    selected_module = st.sidebar.selectbox(
+        "Select data module",
+        ["SEC Financial Data Downloader", "Stock Price Data Downloader"],
+    )
+    if selected_module == "SEC Financial Data Downloader":
+        render_sec_downloader()
+    else:
+        render_stock_price_downloader()
 
 
 if __name__ == "__main__":
